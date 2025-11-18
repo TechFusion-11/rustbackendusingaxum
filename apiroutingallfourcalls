@@ -1,0 +1,613 @@
+// Add Dependencies (Cargo.toml)
+```toml
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+```
+---
+//Create `main.rs`
+use axum::{
+    routing::{get, post, put, patch, delete},
+    Router,
+    extract::{State, Path},
+    Json,
+};
+use serde::{Serialize, Deserialize};
+use std::{sync::{Arc, Mutex}};
+use uuid::Uuid;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct Product {
+    id: String,
+    name: String,
+    price: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CreateProduct {
+    name: String,
+    price: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct UpdateProduct {
+    name: String,
+    price: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PatchProduct {
+    name: Option<String>,
+    price: Option<f64>,
+}
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+type AppState = Arc<Mutex<Vec<Product>>>;
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+Ah! Let’s break down this line carefully:
+
+```rust
+type AppState = Arc<Mutex<Vec<Product>>>;
+```
+
+This is **creating a type alias** in Rust. Let’s go **piece by piece**.
+
+---
+
+# ✅ 1. `type AppState = ...;`
+
+* `type` in Rust allows you to **give a new name to an existing type**.
+* It’s just like a **shortcut** so you don’t have to write `Arc<Mutex<Vec<Product>>>` everywhere.
+* From now on, you can write `AppState` instead of `Arc<Mutex<Vec<Product>>>`.
+
+---
+
+# ✅ 2. `Vec<Product>`
+
+* `Vec<T>` = Rust’s **growable array type** (like `ArrayList` in Java or array in JS).
+* Here it’s `Vec<Product>` → a list of `Product` structs stored in memory.
+* This is your **in-memory database**.
+
+---
+
+# ✅ 3. `Mutex<Vec<Product>>`
+
+* `Mutex` = **mutual exclusion**.
+
+* Rust is **thread-safe**, so you cannot just have multiple threads changing a `Vec` at the same time.
+
+* Wrapping `Vec<Product>` in `Mutex` means:
+
+  > “Only one thread can mutate or read this vector at a time.”
+
+* Usage:
+
+```rust
+let mut products = state.lock().unwrap(); // acquire the lock
+products.push(new_product);               // safe mutation
+```
+
+---
+
+# ✅ 4. `Arc<Mutex<Vec<Product>>>`
+
+* `Arc` = **Atomic Reference Counted pointer**.
+* `Arc` allows multiple threads to **share ownership** of the same data.
+* So `Arc<Mutex<Vec<Product>>>` means:
+
+> “A thread-safe shared vector of products that can be safely accessed/mutated across multiple routes/threads.”
+
+* Without `Arc`, you couldn’t **share the vector** across your API routes.
+
+---
+
+# ✅ 5. Why use this in Axum?
+
+* All Axum **handlers (routes)** run in async threads.
+* You need to **share the product array** among all requests.
+* `Arc<Mutex<Vec<Product>>>` allows:
+
+  * Thread-safe shared memory
+  * Safe mutation inside routes
+  * Easy cloning of the reference (cheap, not duplicating the array)
+
+---
+
+# ✅ 6. How it’s used
+
+```rust
+type AppState = Arc<Mutex<Vec<Product>>>;
+
+async fn create_product(
+    State(state): State<AppState>,
+    Json(input): Json<CreateProduct>,
+) -> Json<Vec<Product>> {
+    let mut products = state.lock().unwrap(); // lock the mutex
+    products.push(Product { ... });           // mutate safely
+    Json(products.clone())                    // return a copy
+}
+```
+
+* `State(state)` → gives access to the shared `AppState`
+* `state.lock().unwrap()` → acquire the mutex to safely modify the vector
+* `products.clone()` → clone the vector to send back in response
+
+---
+
+### 🔹 TL;DR
+
+| Part                       | Meaning                                                    |
+| -------------------------- | ---------------------------------------------------------- |
+| `Vec<Product>`             | Array of products                                          |
+| `Mutex<Vec<Product>>`      | Only one thread can modify/access at a time                |
+| `Arc<Mutex<Vec<Product>>>` | Share the same array across multiple threads/routes safely |
+| `type AppState = ...`      | Create a simple alias to use everywhere                    |
+
+---
+
+If you want, I can **draw a diagram showing Arc → Mutex → Vec flow** — it makes this concept **very easy to visualize**.
+
+Do you want me to do that?
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+#[tokio::main]
+async fn main() {
+    let products: AppState = Arc::new(Mutex::new(vec![]));
+
+    let app = Router::new()
+        .route("/products", post(create_product).get(get_products))
+        .route("/products/:id", 
+            put(update_product)
+            .patch(patch_product)
+            .delete(delete_product)
+        )
+        .with_state(products);
+
+    println!("Server running on http://localhost:3000");
+    axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
+        .serve(app.into_make_service())
+        .await
+        .unwrap();
+}
+
+async fn create_product(
+    State(state): State<AppState>,
+    Json(body): Json<CreateProduct>,
+) -> Json<Vec<Product>> {
+    let mut products = state.lock().unwrap();
+    let product = Product {
+        id: Uuid::new_v4().to_string(),
+        name: body.name,
+        price: body.price,
+    };
+    products.push(product);
+    Json(products.clone())
+}
+
+async fn get_products(State(state): State<AppState>) -> Json<Vec<Product>> {
+    let products = state.lock().unwrap();
+    Json(products.clone())
+}
+
+async fn update_product(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateProduct>,
+) -> Json<String> {
+    let mut products = state.lock().unwrap();
+
+    for p in products.iter_mut() {
+        if p.id == id {
+            p.name = body.name;
+            p.price = body.price;
+            return Json("Product fully updated".to_string());
+        }
+    }
+
+    Json("Product not found".to_string())
+}
+
+async fn patch_product(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<PatchProduct>,
+) -> Json<String> {
+    let mut products = state.lock().unwrap();
+
+    for p in products.iter_mut() {
+        if p.id == id {
+            if let Some(name) = body.name {
+                p.name = name;
+            }
+            if let Some(price) = body.price {
+                p.price = price;
+            }
+            return Json("Product partially updated".to_string());
+        }
+    }
+
+    Json("Product not found".to_string())
+}
+
+async fn delete_product(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<String> {
+    let mut products = state.lock().unwrap();
+
+    let len_before = products.len();
+    products.retain(|p| p.id != id);
+
+    if products.len() < len_before {
+        Json("Product deleted".to_string())
+    } else {
+        Json("Product not found".to_string())
+    }
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+why use imports
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+Here is a **simple, clear explanation** of every line of this import block in Rust:
+
+---
+
+# ✅ **Understanding the Imports (Line-by-Line Explanation)**
+
+```rust
+use axum::{
+    routing::{get, post, put, patch, delete},
+    Router,
+    extract::{State, Path},
+    Json,
+};
+```
+
+### 🔹 **1. `use axum::routing::{get, post, put, patch, delete};`**
+
+Axum’s `routing` module gives us functions for creating API routes:
+
+| Function | Meaning                | Example                                |
+| -------- | ---------------------- | -------------------------------------- |
+| `get`    | Create GET endpoint    | `route("/users", get(handler))`        |
+| `post`   | Create POST endpoint   | `route("/users", post(handler))`       |
+| `put`    | Create PUT endpoint    | `route("/users/:id", put(handler))`    |
+| `patch`  | Create PATCH endpoint  | `route("/users/:id", patch(handler))`  |
+| `delete` | Create DELETE endpoint | `route("/users/:id", delete(handler))` |
+
+These functions tell Axum **what type of HTTP request** a handler should respond to.
+
+---
+
+### 🔹 **2. `use axum::Router;`**
+
+`Router` is the main Axum object used to:
+
+* Create routes
+* Combine routes
+* Add middleware
+* Attach shared state
+
+Example:
+
+```rust
+let app = Router::new()
+    .route("/products", post(create));
+```
+
+The Router is like **Express.js's `app` object**.
+
+---
+
+### 🔹 **3. `use axum::extract::{State, Path};`**
+
+These are used to extract values from the request.
+
+---
+
+### **🔸 `State` — extract global shared state**
+
+Axum lets you share data (like a database or Vec array) across handlers.
+
+Example:
+
+```rust
+State(state): State<AppState>
+```
+
+This means:
+
+* “Give me the app’s shared state (`AppState`).”
+
+Used for sharing:
+
+* Arrays
+* Database connections
+* App configuration
+
+---
+
+### **🔸 `Path` — extract values from URL**
+
+Used to extract dynamic parameters.
+
+Example route:
+
+```
+/products/:id
+```
+
+Rust code:
+
+```rust
+Path(id): Path<String>
+```
+
+This extracts the `id` from URL.
+
+---
+
+### 🔹 **4. `use axum::Json;`**
+
+`Json` is used to send and receive JSON:
+
+✔ Converts request JSON → Rust struct
+✔ Converts Rust struct → JSON response
+
+Example:
+
+```rust
+async fn create(Json(body): Json<CreateProduct>) {
+```
+
+This automatically extracts JSON from request body.
+
+Example response:
+
+```rust
+Json(products)
+```
+
+This converts Rust data → JSON to return.
+
+---
+
+---
+
+# 📌 Now the next set of imports:
+
+```rust
+use serde::{Serialize, Deserialize};
+```
+
+### ✔ Enable converting Rust structs to/from JSON.
+
+You must add this to your structs:
+
+```rust
+#[derive(Serialize, Deserialize)]
+struct Product { ... }
+```
+
+Without Serde, JSON handling is impossible.
+
+---
+
+# 📌 Next:
+
+```rust
+use std::{sync::{Arc, Mutex}};
+```
+
+### ✔ Use this for **shared memory (Vector) across all routes**.
+
+Rust does **not allow mutable global variables**, so to store data in-memory, you must wrap it in:
+
+### **Arc**
+
+→ “Atomic Reference Counted” pointer
+→ Allows multiple threads to share the same data
+
+### **Mutex**
+
+→ Allows safe mutable access (one thread at a time)
+
+Together:
+
+```rust
+Arc<Mutex<Vec<Product>>>
+```
+
+Means:
+
+> “A thread-safe shared array of products.”
+
+Exactly what we need for a product list stored in memory.
+
+---
+
+# 📌 Last import:
+
+```rust
+use uuid::Uuid;
+```
+
+### ✔ Used to generate unique IDs
+
+Example:
+
+```rust
+let id = Uuid::new_v4().to_string();
+```
+
+This produces:
+
+```
+"b9d67e3e-df20-44c0-9e09-f777e9340dfd"
+```
+
+No need to manually maintain auto-increment IDs.
+
+---
+
+# 🎉 Final Summary
+
+| Import                        | Purpose                        |
+| ----------------------------- | ------------------------------ |
+| **get/post/put/patch/delete** | Create HTTP routes             |
+| **Router**                    | Build API routes & app         |
+| **State**                     | Access shared global memory    |
+| **Path**                      | Extract URL parameters         |
+| **Json**                      | JSON request/response handling |
+| **Serialize/Deserialize**     | Convert struct ↔ JSON          |
+| **Arc/Mutex**                 | Thread-safe shared array       |
+| **Uuid**                      | Generate unique IDs            |
+
+---
+
+If you want, I can also explain:
+
+✅ How Router works internally
+✅ How Axum extracts JSON
+✅ How Arc<Mutex<>> works in async Rust
+Just tell me!
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+why use derive
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+Ah! This is a **very important Rust concept**. Let me explain clearly.
+
+---
+
+# ✅ `#[derive(...)]` in Rust
+
+In Rust, `#[derive(...)]` is an **attribute macro** that automatically implements certain **traits** for a struct or enum.
+
+Traits are like **interfaces** in other languages — they define behavior for a type.
+
+Instead of writing boilerplate code yourself, `#[derive(...)]` does it automatically.
+
+---
+
+## 🔹 Example in our Product API
+
+```rust
+#[derive(Serialize, Deserialize, Clone)]
+struct Product {
+    id: String,
+    name: String,
+    price: f64,
+}
+```
+
+Here:
+
+### 1. `Serialize`
+
+* Allows converting the struct **from Rust → JSON**
+* Needed when sending a response with `Json(product)`
+
+Example:
+
+```rust
+let product_json = serde_json::to_string(&product).unwrap();
+```
+
+---
+
+### 2. `Deserialize`
+
+* Allows converting **JSON → Rust struct**
+* Needed when reading a request body with `Json<CreateProduct>`
+
+Example:
+
+```rust
+let new_product: CreateProduct = serde_json::from_str(json_str).unwrap();
+```
+
+---
+
+### 3. `Clone`
+
+* Allows making a **duplicate of the struct**
+* Needed because our in-memory array (`Vec<Product>`) is shared using `Arc<Mutex<>>`
+* Without `Clone`, we cannot safely copy the product to return in responses
+
+Example:
+
+```rust
+let product_copy = product.clone();
+```
+
+---
+
+## 🔹 Why we put `#[derive(...)]` **before every struct**
+
+* Every struct may need different traits.
+* For example:
+
+```rust
+#[derive(Serialize, Deserialize)]
+struct CreateProduct {
+    name: String,
+    price: f64,
+}
+```
+
+* `CreateProduct` is **only used for JSON request**, so we only need `Serialize`/`Deserialize`.
+* `Product` is stored in memory, sent in JSON, and sometimes cloned → so we add `Clone` as well.
+
+---
+
+## 🔹 Quick analogy:
+
+Think of `#[derive(...)]` like **telling Rust “please give my struct these powers automatically”**:
+
+| Trait       | Powers it gives your struct                 |
+| ----------- | ------------------------------------------- |
+| Serialize   | Can turn struct → JSON                      |
+| Deserialize | Can turn JSON → struct                      |
+| Clone       | Can duplicate/copy the struct               |
+| Debug       | Can print with `{:?}`                       |
+| PartialEq   | Can compare two structs for equality (`==`) |
+
+---
+
+### 🔹 Example without derive (manual):
+
+Without `Serialize`/`Deserialize`:
+
+```rust
+let product_json = serde_json::to_string(&product); // ❌ Won't compile
+```
+
+Without `Clone`:
+
+```rust
+let p2 = product.clone(); // ❌ Won't compile
+```
+
+Rust forces you to **explicitly declare the traits**, and `#[derive]` is the easiest way.
+
+---
+
+# ✅ TL;DR
+
+* `#[derive(...)]` = automatically implement traits
+* Avoids **manual boilerplate code**
+* Traits like `Serialize`, `Deserialize`, `Clone` are essential for API development
+* Put it **before every struct that needs special behavior**
+
+---
+
+If you want, I can make a **diagram showing exactly which `#[derive]` is needed for which struct in your Product API** — it will make it super easy to remember.
+
+Do you want me to do that?
+
+
+
+✅ With **SQLite + SQLx**
+✅ With **MongoDB**
+
+Just tell me!
